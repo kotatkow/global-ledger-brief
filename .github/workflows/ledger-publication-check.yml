@@ -1,0 +1,66 @@
+name: Ledger publication check
+
+on:
+  schedule:
+    # 22:00 UTC = 07:00 KST the following day
+    - cron: "0 22 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ledger-publication-check
+  cancel-in-progress: false
+
+jobs:
+  publication-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify public Global Ledger surfaces
+        shell: bash
+        env:
+          BASE_URL: https://global-ledger-brief.kotatko.chatgpt.site
+        run: |
+          set -euo pipefail
+
+          check_page() {
+            local path="$1"
+            local label="$2"
+            local body
+            local headers
+            body="$(mktemp)"
+            headers="$(mktemp)"
+
+            status="$(curl \
+              --silent \
+              --show-error \
+              --location \
+              --max-time 30 \
+              --dump-header "${headers}" \
+              --output "${body}" \
+              --write-out '%{http_code}' \
+              "${BASE_URL}${path}")"
+
+            if [[ "${status}" != "200" ]]; then
+              echo "::error title=${label} unavailable::${path} returned HTTP ${status}"
+              exit 1
+            fi
+
+            if [[ ! -s "${body}" ]]; then
+              echo "::error title=${label} empty::${path} returned an empty response"
+              exit 1
+            fi
+
+            echo "${label}: HTTP 200"
+          }
+
+          check_page "/" "Global Edition"
+          check_page "/korea" "Korean Edition"
+          check_page "/korea/political-dynamics" "Korea Political Dynamics"
+          check_page "/us/political-dynamics" "U.S. Political Dynamics"
+          check_page "/api/political-dynamics" "Korea Political Dynamics API"
+          check_page "/api/political-dynamics/us" "U.S. Political Dynamics API"
+
+          echo "Ledger publication surfaces are reachable. This workflow is intentionally read-only and performs no deployment or editorial mutation."
