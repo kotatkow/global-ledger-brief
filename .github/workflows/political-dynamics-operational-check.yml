@@ -3,7 +3,17 @@ name: Political Dynamics operational check
 on:
   schedule:
     - cron: "45 19 * * *"
+    - cron: "45 21 * * *"
   workflow_dispatch:
+    inputs:
+      action:
+        description: Explicit operation (default does not apply editorial content)
+        type: choice
+        default: operational-check
+        options:
+          - operational-check
+          - us-editorial-apply
+          - korea-editorial-apply
 
 permissions:
   contents: read
@@ -15,19 +25,57 @@ concurrency:
 jobs:
   operational-check:
     runs-on: ubuntu-latest
-    timeout-minutes: 2
+    timeout-minutes: 3
+    env:
+      POLITICAL_OPS_TOKEN: ${{ secrets.POLITICAL_OPS_TOKEN }}
+      POLITICAL_OPS_URL: https://global-ledger-brief.kotatko.chatgpt.site/api/political-dynamics
     steps:
-      - name: Invoke the deployed deterministic check
+      - name: Apply only a pending deployed editorial bundle
         env:
-          POLITICAL_OPS_TOKEN: ${{ secrets.POLITICAL_OPS_TOKEN }}
-          POLITICAL_OPS_URL: https://global-ledger-brief.kotatko.chatgpt.site/api/political-dynamics
+          EVENT_NAME: ${{ github.event_name }}
+          SCHEDULE: ${{ github.event.schedule }}
+          MANUAL_ACTION: ${{ inputs.action }}
         shell: bash
         run: |
           if [[ -z "${POLITICAL_OPS_TOKEN}" ]]; then
             echo "::error::POLITICAL_OPS_TOKEN is not configured"
             exit 1
           fi
+          action="operational-check"
+          if [[ "${EVENT_NAME}" == "schedule" ]]; then
+            case "${SCHEDULE}" in
+              "45 19 * * *") action="us-editorial-apply" ;;
+              "45 21 * * *") action="korea-editorial-apply" ;;
+              *) echo "::error::Unknown schedule"; exit 1 ;;
+            esac
+          elif [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
+            action="${MANUAL_ACTION:-operational-check}"
+          fi
+          case "${action}" in
+            operational-check) exit 0 ;;
+            us-editorial-apply) url="${POLITICAL_OPS_URL}/us" ;;
+            korea-editorial-apply) url="${POLITICAL_OPS_URL}" ;;
+            *) echo "::error::Unsupported operation"; exit 1 ;;
+          esac
+          curl \
+            --fail-with-body \
+            --silent \
+            --show-error \
+            --max-time 30 \
+            --request POST \
+            --header "Content-Type: application/json" \
+            --header "X-Political-Ops-Token: ${POLITICAL_OPS_TOKEN}" \
+            --data '{"action":"editorial-sync"}' \
+            "${url}" > /dev/null
 
+      - name: Check both jurisdictions even if editorial apply failed
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          if [[ -z "${POLITICAL_OPS_TOKEN}" ]]; then
+            echo "::error::POLITICAL_OPS_TOKEN is not configured"
+            exit 1
+          fi
           curl \
             --fail-with-body \
             --silent \
@@ -37,5 +85,4 @@ jobs:
             --header "Content-Type: application/json" \
             --header "X-Political-Ops-Token: ${POLITICAL_OPS_TOKEN}" \
             --data '{"action":"operational-check"}' \
-            "${POLITICAL_OPS_URL}" \
-            > /dev/null
+            "${POLITICAL_OPS_URL}" > /dev/null
