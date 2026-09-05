@@ -2,8 +2,11 @@ name: Political Dynamics operational check
 
 on:
   schedule:
-    - cron: "45 19 * * *"
-    - cron: "45 21 * * *"
+    # 06:00 UTC = 15:00 KST
+    # Tuesday: apply only a pending U.S. editorial bundle prepared by the 14:00 KST weekly task.
+    - cron: "0 6 * * 2"
+    # Friday: apply only a pending Korea editorial bundle prepared by the 14:00 KST weekly task.
+    - cron: "0 6 * * 5"
   workflow_dispatch:
     inputs:
       action:
@@ -41,22 +44,25 @@ jobs:
             echo "::error::POLITICAL_OPS_TOKEN is not configured"
             exit 1
           fi
+
           action="operational-check"
           if [[ "${EVENT_NAME}" == "schedule" ]]; then
             case "${SCHEDULE}" in
-              "45 19 * * *") action="us-editorial-apply" ;;
-              "45 21 * * *") action="korea-editorial-apply" ;;
+              "0 6 * * 2") action="us-editorial-apply" ;;
+              "0 6 * * 5") action="korea-editorial-apply" ;;
               *) echo "::error::Unknown schedule"; exit 1 ;;
             esac
           elif [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
             action="${MANUAL_ACTION:-operational-check}"
           fi
+
           case "${action}" in
             operational-check) exit 0 ;;
             us-editorial-apply) url="${POLITICAL_OPS_URL}/us" ;;
             korea-editorial-apply) url="${POLITICAL_OPS_URL}" ;;
             *) echo "::error::Unsupported operation"; exit 1 ;;
           esac
+
           curl \
             --fail-with-body \
             --silent \
@@ -76,6 +82,7 @@ jobs:
             echo "::error::POLITICAL_OPS_TOKEN is not configured"
             exit 1
           fi
+
           curl \
             --fail-with-body \
             --silent \
