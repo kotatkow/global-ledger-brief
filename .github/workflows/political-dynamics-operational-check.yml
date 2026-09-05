@@ -35,7 +35,6 @@ jobs:
             --max-time 30 \
             --request POST \
             --header "Content-Type: application/json" \
-            --header "OAI-Sites-Authorization: Bearer ${POLITICAL_OPS_TOKEN}" \
             --header "X-Political-Ops-Token: ${POLITICAL_OPS_TOKEN}" \
             --data '{"action":"operational-check"}' \
             "${POLITICAL_OPS_URL}" \
