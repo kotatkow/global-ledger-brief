@@ -1,0 +1,42 @@
+name: Political Dynamics operational check
+
+on:
+  schedule:
+    - cron: "45 19 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: political-dynamics-operational-check
+  cancel-in-progress: false
+
+jobs:
+  operational-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Invoke the deployed deterministic check
+        env:
+          POLITICAL_OPS_TOKEN: ${{ secrets.POLITICAL_OPS_TOKEN }}
+          POLITICAL_OPS_URL: https://global-ledger-brief.kotatko.chatgpt.site/api/political-dynamics
+        shell: bash
+        run: |
+          if [[ -z "${POLITICAL_OPS_TOKEN}" ]]; then
+            echo "::error::POLITICAL_OPS_TOKEN is not configured"
+            exit 1
+          fi
+
+          curl \
+            --fail-with-body \
+            --silent \
+            --show-error \
+            --max-time 30 \
+            --request POST \
+            --header "Content-Type: application/json" \
+            --header "OAI-Sites-Authorization: Bearer ${POLITICAL_OPS_TOKEN}" \
+            --header "X-Political-Ops-Token: ${POLITICAL_OPS_TOKEN}" \
+            --data '{"action":"operational-check"}' \
+            "${POLITICAL_OPS_URL}" \
+            > /dev/null
