@@ -1,0 +1,39 @@
+name: U.S. Political Dynamics editorial sync (manual only)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: us-political-dynamics-editorial-sync
+  cancel-in-progress: false
+
+jobs:
+  editorial-sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Invoke the one-time U.S. editorial synchronization
+        env:
+          POLITICAL_OPS_TOKEN: ${{ secrets.POLITICAL_OPS_TOKEN }}
+          POLITICAL_OPS_URL: https://global-ledger-brief.kotatko.chatgpt.site/api/political-dynamics/us
+        shell: bash
+        run: |
+          if [[ -z "${POLITICAL_OPS_TOKEN}" ]]; then
+            echo "::error::POLITICAL_OPS_TOKEN is not configured"
+            exit 1
+          fi
+
+          curl \
+            --fail-with-body \
+            --silent \
+            --show-error \
+            --max-time 30 \
+            --request POST \
+            --header "Content-Type: application/json" \
+            --header "X-Political-Ops-Token: ${POLITICAL_OPS_TOKEN}" \
+            --data '{"action":"editorial-sync"}' \
+            "${POLITICAL_OPS_URL}" \
+            > /dev/null
