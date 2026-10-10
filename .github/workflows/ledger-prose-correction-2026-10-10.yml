@@ -1,0 +1,243 @@
+name: Reviewed October 10 prose correction
+
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/ledger-prose-correction-2026-10-10.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ledger-prose-correction-2026-10-10
+  cancel-in-progress: false
+
+jobs:
+  correct-reviewed-editions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      POLITICAL_OPS_TOKEN: ${{ secrets.POLITICAL_OPS_TOKEN }}
+    steps:
+      - name: Apply the two pinned October 10 revisions through the existing owner route
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY_CORRECTION'
+          """One-time reviewed correction. No retries; secrets remain in the GitHub runner."""
+          import copy
+          import hashlib
+          import json
+          import os
+          import sys
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+          
+          MANIFEST = json.loads(r'''{
+            "date": "2026-10-10",
+            "site": "https://www.the-global-ledger.com",
+            "desks": {
+              "global": {
+                "beforeFingerprint": "2c7cfc03651fab249464b218e85533d3d38e920b193f888ecd16f72c6ca98321",
+                "candidateFingerprint": "cc9c902b22989a54c5767a87e1056ade45eb468338a31e81b98e34522e89d7d9",
+                "beforeReaderFingerprint": "39bd3a705a042b57c8a17eb8e0cb087f7f5dd620e1dbb2f515574d1322c8cdd8",
+                "afterReaderFingerprint": "1dd59cab22e7c81fe9aae3625e82841972722daab89b705c0dc9c18c2f80ac76",
+                "publishedAt": "2026-10-09T19:19:31Z",
+                "articleIds": [
+                  1,
+                  2,
+                  3,
+                  4,
+                  5
+                ]
+              },
+              "korea": {
+                "beforeFingerprint": "31f370d15b1c12e260754a1e732208ca3d18c0142310cb094a53e7ef594f68cd",
+                "candidateFingerprint": "75f290faa40e1a5d8f461f96ae6c1b267f1992259781836edefc8e4d3b249786",
+                "beforeReaderFingerprint": "f7912ea651f1904fef3f4440b03b4bf46640f458dc55ff065d8538848af7b053",
+                "afterReaderFingerprint": "1b8a2b41395954859514e99a1e035d2e497c54b49e06e7d06f0f2acbd6795eb3",
+                "publishedAt": "2026-10-09T19:19:31Z",
+                "articleIds": [
+                  1,
+                  2,
+                  3,
+                  4,
+                  5
+                ]
+              }
+            }
+          }''')
+          SITE = MANIFEST['site']
+          
+          
+          def digest(value):
+              return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()
+          
+          
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, req, fp, code, msg, headers, newurl):
+                  raise RuntimeError('Unexpected redirect; no credentials forwarded')
+          
+          
+          def live_request(path, body=None):
+              if not path.startswith('/api/') or path.startswith('//'):
+                  raise RuntimeError('Unexpected request path')
+              headers = {'accept': 'application/json'}
+              data = None
+              if body is not None:
+                  if path != '/api/publication' or body.get('action') != 'publish-reviewed':
+                      raise RuntimeError('Unexpected write operation')
+                  token = os.environ.get('POLITICAL_OPS_TOKEN')
+                  if not token:
+                      raise RuntimeError('Existing hosted operations secret is unavailable')
+                  headers['X-Political-Ops-Token'] = token
+                  headers['content-type'] = 'application/json'
+                  data = json.dumps(body, separators=(',', ':')).encode()
+              req = urllib.request.Request(SITE + path, data=data, headers=headers)
+              try:
+                  with urllib.request.build_opener(NoRedirect()).open(req, timeout=30) as response:
+                      return json.load(response)
+              except urllib.error.HTTPError as error:
+                  raise RuntimeError(f'HTTP {error.code}; no retry attempted. Inspect persisted state before rerunning.') from None
+              except (urllib.error.URLError, TimeoutError):
+                  raise RuntimeError('Request outcome is uncertain; no retry attempted. Inspect persisted state before rerunning.') from None
+          
+          
+          def inspect_edition(value, edition):
+              expected = MANIFEST['desks'][edition]
+              if value['edition'] != edition or value['publicationDate'] != MANIFEST['date'] or value['publishedAt'] != expected['publishedAt']:
+                  raise RuntimeError(f'{edition}: date or original publication time changed')
+              if [story['id'] for story in value['stories']] != expected['articleIds']:
+                  raise RuntimeError(f'{edition}: article identity changed')
+              if any(len(story['paragraphs']) != 4 for story in value['stories']):
+                  raise RuntimeError(f'{edition}: paragraph count changed')
+              fingerprint = digest(value)
+              if fingerprint not in (expected['beforeReaderFingerprint'], expected['afterReaderFingerprint']):
+                  raise RuntimeError(f'{edition}: unreviewed reader state; stopped')
+              return fingerprint
+          
+          
+          def run(request=live_request):
+              initial = request('/api/editions')
+              for edition in ('global', 'korea'):
+                  inspect_edition(initial['latest'][edition], edition)
+              archive = copy.deepcopy(initial['archive'])
+              historical = {}
+              for entry in archive:
+                  if entry['publicationDate'] != MANIFEST['date']:
+                      path = '/api/editions?' + urllib.parse.urlencode({'edition': entry['edition'], 'date': entry['publicationDate']})
+                      historical[path] = digest(request(path))
+              # Old deployments reject publish-reviewed rather than ignoring the guards.
+              for edition in ('global', 'korea'):
+                  expected = MANIFEST['desks'][edition]
+                  response = request('/api/publication', {
+                      'action': 'publish-reviewed', 'edition': edition,
+                      'candidateFingerprint': expected['candidateFingerprint'],
+                      'persistedFingerprint': expected['beforeFingerprint'], 'dry_run': True,
+                  })
+                  if response.get('outcome') not in ('dry_run', 'already_persisted') or response.get('writes') is not False:
+                      raise RuntimeError(f'{edition}: guarded dry-run not confirmed')
+                  if response.get('candidateFingerprint') != expected['candidateFingerprint']:
+                      raise RuntimeError(f'{edition}: deployed candidate differs from review')
+                  if response.get('persistedFingerprint') not in (expected['beforeFingerprint'], expected['candidateFingerprint']):
+                      raise RuntimeError(f'{edition}: persisted fingerprint changed')
+              for edition in ('global', 'korea'):
+                  expected = MANIFEST['desks'][edition]
+                  current = request('/api/editions')['latest'][edition]
+                  current_hash = inspect_edition(current, edition)
+                  # Still call the guarded operation to confirm full canonical identity.
+                  # A completed desk returns already_persisted with zero additional writes.
+                  response = request('/api/publication', {
+                      'action': 'publish-reviewed', 'edition': edition,
+                      'candidateFingerprint': expected['candidateFingerprint'],
+                      'persistedFingerprint': expected['beforeFingerprint'], 'dry_run': False,
+                  })
+                  if response.get('outcome') not in ('persisted', 'already_persisted'):
+                      raise RuntimeError(f'{edition}: correction not confirmed')
+                  if response.get('candidateFingerprint') != expected['candidateFingerprint'] or response.get('persistedFingerprint') != expected['candidateFingerprint']:
+                      raise RuntimeError(f'{edition}: post-commit fingerprint mismatch')
+                  if current_hash == expected['afterReaderFingerprint'] and response.get('writes') is not False:
+                      raise RuntimeError(f'{edition}: replay unexpectedly wrote data')
+                  latest = request('/api/editions')['latest'][edition]
+                  if inspect_edition(latest, edition) != expected['afterReaderFingerprint']:
+                      raise RuntimeError(f'{edition}: corrected reader content not confirmed')
+                  print(f'{edition}: {response["outcome"]}; canonical and reader fingerprints verified; original publication time retained')
+              final = request('/api/editions')
+              for edition in ('global', 'korea'):
+                  if inspect_edition(final['latest'][edition], edition) != MANIFEST['desks'][edition]['afterReaderFingerprint']:
+                      raise RuntimeError(f'{edition}: final corrected reader content changed')
+              if final['archive'] != archive:
+                  raise RuntimeError('Archive index changed')
+              for path, before in historical.items():
+                  if digest(request(path)) != before:
+                      raise RuntimeError('An older edition changed')
+              print('Both October 10 editions verified. Older editions and archive index unchanged. No automatic retries performed.')
+          
+          
+          def self_test():
+              # Synthetic local request adapter proves control flow without network or secrets.
+              global MANIFEST
+              real = MANIFEST
+              MANIFEST = copy.deepcopy(real)
+              def edition_value(edition, text):
+                  return {'edition': edition, 'publicationDate': '2026-10-10', 'publishedAt': '2026-10-09T19:19:31Z',
+                          'stories': [{'id': i, 'paragraphs': [{'text': text}] * 4} for i in range(1, 6)]}
+              before = {edition: edition_value(edition, 'before') for edition in ('global', 'korea')}
+              after = {edition: edition_value(edition, 'after') for edition in ('global', 'korea')}
+              for edition in before:
+                  MANIFEST['desks'][edition]['beforeReaderFingerprint'] = digest(before[edition])
+                  MANIFEST['desks'][edition]['afterReaderFingerprint'] = digest(after[edition])
+              state = copy.deepcopy(before)
+              writes = []
+              def fake(path, body=None):
+                  if body is None:
+                      return {'latest': copy.deepcopy(state), 'archive': []}
+                  edition = body['edition']; expected = MANIFEST['desks'][edition]
+                  done = state[edition] == after[edition]
+                  if done:
+                      return {'outcome': 'already_persisted', 'writes': False, 'candidateFingerprint': expected['candidateFingerprint'], 'persistedFingerprint': expected['candidateFingerprint']}
+                  if body['dry_run']:
+                      return {'outcome': 'dry_run', 'writes': False, 'candidateFingerprint': expected['candidateFingerprint'], 'persistedFingerprint': expected['beforeFingerprint']}
+                  state[edition] = copy.deepcopy(after[edition]); writes.append(edition)
+                  return {'outcome': 'persisted', 'writes': True, 'candidateFingerprint': expected['candidateFingerprint'], 'persistedFingerprint': expected['candidateFingerprint']}
+              run(fake); assert writes == ['global', 'korea']
+              run(fake); assert writes == ['global', 'korea']
+              state['global']['stories'][0]['paragraphs'][0]['text'] = 'unexpected'
+              try:
+                  run(fake)
+                  raise AssertionError('Unreviewed state was accepted')
+              except RuntimeError as error:
+                  assert 'unreviewed reader state' in str(error)
+              state = copy.deepcopy(before)
+              writes.clear()
+              reads = 0
+              def changed_before_final(path, body=None):
+                  nonlocal reads
+                  if body is None:
+                      reads += 1
+                      if reads == 6:
+                          state['global'] = copy.deepcopy(before['global'])
+                  return fake(path, body)
+              try:
+                  run(changed_before_final)
+                  raise AssertionError('Final intervening change was accepted')
+              except RuntimeError as error:
+                  assert 'final corrected reader content changed' in str(error)
+              MANIFEST = real
+              print('OFFLINE SELF-TEST PASS: one write per desk, replay no-op, unexpected and final intervening states reject; no network or secret use')
+          
+          
+          if __name__ == '__main__':
+              try:
+                  if sys.argv[1:] == ['--self-test']:
+                      self_test()
+                  elif not sys.argv[1:]:
+                      run()
+                  else:
+                      raise RuntimeError('Unsupported argument')
+              except Exception as error:
+                  print(f'Correction stopped: {error}', file=sys.stderr)
+                  sys.exit(1)
+          PY_CORRECTION
