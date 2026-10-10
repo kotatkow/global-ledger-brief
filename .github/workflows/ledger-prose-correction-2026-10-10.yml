@@ -31,9 +31,9 @@ jobs:
           import json
           import os
           import sys
-          import urllib.error
           import urllib.parse
-          import urllib.request
+          import subprocess
+          import tempfile
           
           MANIFEST = json.loads(r'''{
             "date": "2026-10-10",
@@ -76,33 +76,38 @@ jobs:
               return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()
           
           
-          class NoRedirect(urllib.request.HTTPRedirectHandler):
-              def redirect_request(self, req, fp, code, msg, headers, newurl):
-                  raise RuntimeError('Unexpected redirect; no credentials forwarded')
-          
-          
           def live_request(path, body=None):
               if not path.startswith('/api/') or path.startswith('//'):
                   raise RuntimeError('Unexpected request path')
-              headers = {'accept': 'application/json'}
-              data = None
+              config = 'header = "Accept: application/json"\n'
+              method = 'GET'
               if body is not None:
                   if path != '/api/publication' or body.get('action') != 'publish-reviewed':
                       raise RuntimeError('Unexpected write operation')
                   token = os.environ.get('POLITICAL_OPS_TOKEN')
-                  if not token:
+                  if not token or '\r' in token or '\n' in token:
                       raise RuntimeError('Existing hosted operations secret is unavailable')
-                  headers['X-Political-Ops-Token'] = token
-                  headers['content-type'] = 'application/json'
-                  data = json.dumps(body, separators=(',', ':')).encode()
-              req = urllib.request.Request(SITE + path, data=data, headers=headers)
-              try:
-                  with urllib.request.build_opener(NoRedirect()).open(req, timeout=30) as response:
+                  method = 'POST'
+                  # The secret is passed to curl on stdin, never command arguments or logs.
+                  config += 'header = ' + json.dumps('X-Political-Ops-Token: ' + token) + '\n'
+                  config += 'header = "Content-Type: application/json"\n'
+                  config += 'data-binary = ' + json.dumps(json.dumps(body, separators=(',', ':'))) + '\n'
+              with tempfile.TemporaryDirectory() as directory:
+                  response_path = os.path.join(directory, 'response.json')
+                  command = ['curl', '--disable', '--silent', '--show-error', '--max-time', '30', '--proto', '=https',
+                             '--request', method, '--output', response_path, '--write-out', '%{http_code}',
+                             '--config', '-', SITE + path]
+                  # No --location and no --retry: redirects and uncertain outcomes stop.
+                  try:
+                      result = subprocess.run(command, input=config, text=True, capture_output=True, timeout=35)
+                  except subprocess.TimeoutExpired:
+                      raise RuntimeError(f'{method} {path}: outcome uncertain; no retry attempted') from None
+                  if result.returncode != 0:
+                      raise RuntimeError(f'{method} {path}: transport failed or outcome uncertain; no retry attempted')
+                  if result.stdout.strip() != '200':
+                      raise RuntimeError(f'{method} {path}: HTTP {result.stdout.strip()}; no retry attempted. Inspect persisted state before rerunning.')
+                  with open(response_path, encoding='utf-8') as response:
                       return json.load(response)
-              except urllib.error.HTTPError as error:
-                  raise RuntimeError(f'HTTP {error.code}; no retry attempted. Inspect persisted state before rerunning.') from None
-              except (urllib.error.URLError, TimeoutError):
-                  raise RuntimeError('Request outcome is uncertain; no retry attempted. Inspect persisted state before rerunning.') from None
           
           
           def inspect_edition(value, edition):
