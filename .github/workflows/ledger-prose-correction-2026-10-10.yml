@@ -37,7 +37,7 @@ jobs:
           
           MANIFEST = json.loads(r'''{
             "date": "2026-10-10",
-            "site": "https://www.the-global-ledger.com",
+            "site": "https://global-ledger-brief.kotatko.chatgpt.site",
             "desks": {
               "global": {
                 "beforeFingerprint": "2c7cfc03651fab249464b218e85533d3d38e920b193f888ecd16f72c6ca98321",
