@@ -24,43 +24,117 @@ jobs:
           BASE_URL: https://global-ledger-brief.kotatko.chatgpt.site
         run: |
           set -euo pipefail
+          workdir="$(mktemp -d)"
+          trap 'rm -rf "$workdir"' EXIT
+          failed=0
 
           check_page() {
-            local path="$1"
-            local label="$2"
-            local body
-            local headers
-            body="$(mktemp)"
-            headers="$(mktemp)"
-
-            status="$(curl \
-              --silent \
-              --show-error \
-              --location \
-              --max-time 30 \
-              --dump-header "${headers}" \
-              --output "${body}" \
-              --write-out '%{http_code}' \
-              "${BASE_URL}${path}")"
-
-            if [[ "${status}" != "200" ]]; then
-              echo "::error title=${label} unavailable::${path} returned HTTP ${status}"
-              exit 1
+            local path="$1" label="$2" status
+            if ! status="$(curl --silent --show-error --location --max-time 30 \
+              --output "${workdir}/body" --write-out '%{http_code}' \
+              "${BASE_URL}${path}")"; then
+              echo "::error title=${label} unavailable::${path} transport failed"
+              failed=1
+            elif [[ "${status}" != "200" || ! -s "${workdir}/body" ]]; then
+              echo "::error title=${label} unavailable::${path} returned HTTP ${status} or an empty response"
+              failed=1
+            else
+              echo "${label}: HTTP 200"
             fi
-
-            if [[ ! -s "${body}" ]]; then
-              echo "::error title=${label} empty::${path} returned an empty response"
-              exit 1
-            fi
-
-            echo "${label}: HTTP 200"
           }
 
-          check_page "/" "Global Edition"
-          check_page "/korea" "Korean Edition"
+          # Both ordinary desks use the homepage edition selector; /korea is not a route.
+          check_page "/" "Global and Korean edition reader"
           check_page "/korea/political-dynamics" "Korea Political Dynamics"
           check_page "/us/political-dynamics" "U.S. Political Dynamics"
           check_page "/api/political-dynamics" "Korea Political Dynamics API"
           check_page "/api/political-dynamics/us" "U.S. Political Dynamics API"
+          exit "${failed}"
 
-          echo "Ledger publication surfaces are reachable. This workflow is intentionally read-only and performs no deployment or editorial mutation."
+      - name: Verify both persisted daily edition outcomes
+        if: ${{ !cancelled() }}
+        shell: bash
+        env:
+          BASE_URL: https://global-ledger-brief.kotatko.chatgpt.site
+        run: |
+          set -euo pipefail
+          body="$(mktemp)"
+          trap 'rm -f "$body"' EXIT
+          status="$(curl --silent --show-error --location --max-time 30 \
+            --header 'Accept: application/json' --header 'Cache-Control: no-cache' \
+            --output "$body" --write-out '%{http_code}' "${BASE_URL}/api/editions")"
+          if [[ "$status" != "200" ]]; then
+            echo "::error title=Edition API unavailable::GET /api/editions returned HTTP ${status}"
+            exit 1
+          fi
+
+          python3 - "$body" <<'PY'
+          import json
+          import sys
+          from datetime import date, datetime, timedelta
+          from zoneinfo import ZoneInfo
+
+          def check(payload, now):
+              today = now.date()
+              # Daily delivery target is 05:00 KST. The scheduled check remains 07:00.
+              # A manual check before 05:00 must not prematurely fail today's delivery.
+              expected = (now - timedelta(hours=5)).date()
+              failed = False
+              latest = payload.get("latest") if isinstance(payload, dict) else None
+              for desk in ("global", "korea"):
+                  try:
+                      edition = latest.get(desk) if isinstance(latest, dict) else None
+                      if not isinstance(edition, dict) or edition.get("edition") != desk:
+                          raise ValueError("missing or mismatched persisted desk")
+                      published = date.fromisoformat(edition["publicationDate"])
+                      if published > today:
+                          raise ValueError("future publication date")
+                      timestamp = datetime.fromisoformat(edition["publishedAt"].replace("Z", "+00:00"))
+                      if timestamp.tzinfo is None or timestamp > now:
+                          raise ValueError("invalid or future publication timestamp")
+                      stories = edition["stories"]
+                      if not isinstance(stories, list) or not 1 <= len(stories) <= 5:
+                          raise ValueError("persisted edition must retain 1–5 articles")
+                      ids = set()
+                      for story in stories:
+                          if not isinstance(story, dict) or not isinstance(story.get("id"), int):
+                              raise ValueError("invalid article record")
+                          if story["id"] in ids or not isinstance(story.get("title"), str) or not story["title"].strip():
+                              raise ValueError("duplicate article ID or missing title")
+                          ids.add(story["id"])
+                          paragraphs = story.get("paragraphs")
+                          if not isinstance(paragraphs, list) or len(paragraphs) != 4 or not all(
+                              isinstance(p, dict) and isinstance(p.get("text"), str) and p["text"].strip()
+                              for p in paragraphs
+                          ):
+                              raise ValueError("article body must contain four nonempty paragraphs")
+                          refs = story.get("references")
+                          if not isinstance(refs, list) or not refs or not all(isinstance(r, str) and r.strip() for r in refs):
+                              raise ValueError("missing article references")
+                      notice = edition.get("noQualifyingDate")
+                      if notice is not None:
+                          notice_date = date.fromisoformat(notice)
+                          if notice_date <= published or notice_date > today:
+                              raise ValueError("inconsistent no-qualifying notice")
+                      if published >= expected:
+                          print(f"{desk}: published {published}; {len(stories)} complete reader articles")
+                      elif notice is not None and notice_date >= expected:
+                          print(f"::warning title={desk} no new edition::{notice_date}: persisted no-qualifying outcome; retaining {published} ({len(stories)} articles)")
+                      else:
+                          raise ValueError(f"stale edition {published}; expected outcome for {expected} or later")
+                  except (KeyError, TypeError, ValueError, AttributeError) as exc:
+                      print(f"::error title={desk} publication check failed::{exc}")
+                      failed = True
+              return failed
+
+          if __name__ == "__main__":
+              try:
+                  with open(sys.argv[1], encoding="utf-8") as source:
+                      payload = json.load(source)
+              except (OSError, ValueError) as exc:
+                  print(f"::error title=Invalid edition API response::{type(exc).__name__}")
+                  raise SystemExit(1)
+              raise SystemExit(check(payload, datetime.now(ZoneInfo("Asia/Seoul"))))
+          PY
+
+          echo "Persisted edition outcomes and reader completeness verified. Read-only; no deployment or editorial mutation. This is not an editorial-audit or PDF certification."
